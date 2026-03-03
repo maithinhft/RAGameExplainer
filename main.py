@@ -20,10 +20,16 @@ Chạy server:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import shutil
+import subprocess
+import sys
 import urllib.request
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -38,14 +44,20 @@ from rag.pipeline import RAGPipeline
 # CẤU HÌNH
 # ═══════════════════════════════════════════════════════════
 
-# URL của Ollama LLM server
-LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8080/nhan-tin-nhan")
+# URL của Ollama LLM server (local)
+LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:11434/api/generate")
 
 # Tên mô hình LLM
 MODEL_NAME = os.getenv("LLM_MODEL", "qwen3:14b")
 
 # Đường dẫn tới dữ liệu đã crawl
 DATA_DIR = os.getenv("DATA_DIR", "league-of-legend/data")
+
+# Thư mục gốc của crawler
+CRAWLER_DIR = os.getenv("CRAWLER_DIR", "league-of-legend")
+
+# Chu kỳ cập nhật dữ liệu (giây) — mặc định 1 tiếng
+REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL_SECONDS", str(60 * 60)))
 
 # Port mặc định
 PORT = int(os.getenv("PORT", "8000"))
@@ -56,13 +68,48 @@ PORT = int(os.getenv("PORT", "8000"))
 # ═══════════════════════════════════════════════════════════
 
 pipeline: RAGPipeline | None = None
+_refresh_task: asyncio.Task | None = None
+last_refresh_time: str = "(chưa cập nhật)"
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Khởi tạo RAG pipeline khi server khởi động."""
-    global pipeline
-    print("🔧 Initializing RAG pipeline...")
+def _run_crawler() -> bool:
+    """Chạy crawler để lấy dữ liệu mới. Trả về True nếu thành công."""
+    data_path = Path(DATA_DIR)
+
+    # Bước 1: Xóa toàn bộ dữ liệu cũ
+    if data_path.exists():
+        print("🗑️  Xóa dữ liệu cũ...")
+        shutil.rmtree(data_path)
+
+    # Bước 2: Chạy crawler
+    print("🔄 Đang crawl dữ liệu mới từ Data Dragon...")
+    try:
+        result = subprocess.run(
+            [sys.executable, "main.py", "--all"],
+            cwd=CRAWLER_DIR,
+            capture_output=True,
+            text=True,
+            timeout=300,  # timeout 5 phút
+        )
+        if result.returncode == 0:
+            print("✅ Crawl dữ liệu thành công!")
+            return True
+        else:
+            print(f"❌ Crawl thất bại (exit code {result.returncode})")
+            print(f"   stderr: {result.stderr[:500]}")
+            return False
+    except subprocess.TimeoutExpired:
+        print("❌ Crawl bị timeout (> 5 phút)")
+        return False
+    except Exception as exc:
+        print(f"❌ Lỗi khi chạy crawler: {exc}")
+        return False
+
+
+def _rebuild_pipeline() -> None:
+    """Khởi tạo lại RAG pipeline với dữ liệu mới."""
+    global pipeline, last_refresh_time
+    print("🔧 Rebuilding RAG pipeline...")
     pipeline = RAGPipeline(
         data_dir=DATA_DIR,
         server_url=LLM_SERVER_URL,
@@ -70,8 +117,52 @@ async def lifespan(app: FastAPI):
         top_k=5,
     )
     pipeline.initialize()
-    print(f"✅ Server ready! Indexed {len(pipeline._indexer.documents)} documents")
+    last_refresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"✅ Pipeline rebuilt! {len(pipeline._indexer.documents)} documents indexed at {last_refresh_time}")
+
+
+async def _periodic_refresh() -> None:
+    """Background task: định kỳ crawl lại dữ liệu và rebuild index."""
+    while True:
+        await asyncio.sleep(REFRESH_INTERVAL)
+        print(f"\n{'='*60}")
+        print(f"⏰ Bắt đầu cập nhật dữ liệu định kỳ ({REFRESH_INTERVAL}s interval)...")
+        print(f"{'='*60}")
+
+        # Chạy crawler trong thread pool để không block event loop
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, _run_crawler)
+
+        if success:
+            await loop.run_in_executor(None, _rebuild_pipeline)
+        else:
+            print("⚠️  Giữ nguyên dữ liệu cũ do crawl thất bại.")
+
+        print(f"{'='*60}\n")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Khởi tạo RAG pipeline khi server khởi động + bật scheduler."""
+    global pipeline, _refresh_task
+
+    # Khởi tạo pipeline lần đầu
+    _rebuild_pipeline()
+
+    # Bật background task cập nhật định kỳ
+    _refresh_task = asyncio.create_task(_periodic_refresh())
+    interval_min = REFRESH_INTERVAL // 60
+    print(f"⏰ Auto-refresh enabled: mỗi {interval_min} phút")
+
     yield
+
+    # Cleanup
+    if _refresh_task:
+        _refresh_task.cancel()
+        try:
+            await _refresh_task
+        except asyncio.CancelledError:
+            pass
     print("👋 Shutting down...")
 
 
@@ -155,6 +246,8 @@ class StatsResponse(BaseModel):
     categories: dict[str, int]
     llm_server_url: str
     model_name: str
+    last_refresh: str
+    refresh_interval_minutes: int
 
 
 # ═══════════════════════════════════════════════════════════
@@ -167,7 +260,19 @@ async def health_check():
     return {
         "status": "ok",
         "pipeline_ready": pipeline is not None and pipeline.is_initialized,
+        "last_refresh": last_refresh_time,
     }
+
+
+@app.post("/refresh")
+async def manual_refresh():
+    """Cập nhật dữ liệu thủ công — xóa data cũ và crawl lại."""
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(None, _run_crawler)
+    if success:
+        await loop.run_in_executor(None, _rebuild_pipeline)
+        return {"status": "ok", "message": "Dữ liệu đã được cập nhật", "last_refresh": last_refresh_time}
+    raise HTTPException(status_code=500, detail="Crawl thất bại, giữ lại dữ liệu cũ")
 
 
 @app.get("/stats", response_model=StatsResponse)
@@ -186,6 +291,8 @@ async def get_stats():
         categories=categories,
         llm_server_url=pipeline.server_url,
         model_name=pipeline.model_name,
+        last_refresh=last_refresh_time,
+        refresh_interval_minutes=REFRESH_INTERVAL // 60,
     )
 
 
@@ -291,28 +398,21 @@ async def ask_direct(request: AskRequest):
     model = request.model or MODEL_NAME
 
     payload = {
-        "ten_mo_hinh": model,
-        "cau_hoi": request.question,
+        "model": model,
+        "prompt": request.question,
+        "stream": False,
     }
 
     req = urllib.request.Request(
         server_url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "ngrok-skip-browser-warning": "true",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        },
+        headers={"Content-Type": "application/json"},
     )
 
     try:
         response = urllib.request.urlopen(req)
         result = json.loads(response.read().decode("utf-8"))
-        answer = result.get("cau_tra_loi_tu_he_thong", "(Không có câu trả lời)")
+        answer = result.get("response", "(Không có câu trả lời)")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM server error: {exc}")
 

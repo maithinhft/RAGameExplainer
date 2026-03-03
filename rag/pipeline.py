@@ -126,28 +126,21 @@ class RAGPipeline:
             )
 
         payload = {
-            "ten_mo_hinh": self.model_name,
-            "cau_hoi": prompt,
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False,
         }
 
         req = urllib.request.Request(
             self.server_url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "ngrok-skip-browser-warning": "true",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            },
+            headers={"Content-Type": "application/json"},
         )
 
         try:
             response = urllib.request.urlopen(req)
             result = json.loads(response.read().decode("utf-8"))
-            return result.get("cau_tra_loi_tu_he_thong", "(Không có câu trả lời)")
+            return result.get("response", "(Không có câu trả lời)")
         except Exception as exc:
             raise ConnectionError(f"Failed to reach LLM server: {exc}") from exc
 
