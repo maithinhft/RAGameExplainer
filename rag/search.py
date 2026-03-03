@@ -90,16 +90,23 @@ class SearchEngine:
     def __init__(self, indexer: Indexer) -> None:
         self.indexer = indexer
         self.documents = indexer.documents
+        self._tfidf_ready = False
 
-        # Build TF-IDF index
-        corpus = [doc.content for doc in self.documents]
-        self._vectorizer = TfidfVectorizer(
-            max_features=20000,
-            ngram_range=(1, 2),
-            stop_words=None,  # Keep all terms for game data
-            sublinear_tf=True,
-        )
-        self._tfidf_matrix = self._vectorizer.fit_transform(corpus)
+        # Build TF-IDF index (skip if corpus is empty)
+        if self.documents:
+            corpus = [doc.content for doc in self.documents]
+            self._vectorizer = TfidfVectorizer(
+                max_features=20000,
+                ngram_range=(1, 2),
+                stop_words=None,  # Keep all terms for game data
+                sublinear_tf=True,
+            )
+            self._tfidf_matrix = self._vectorizer.fit_transform(corpus)
+            self._tfidf_ready = True
+        else:
+            self._vectorizer = None
+            self._tfidf_matrix = None
+            print("⚠️  SearchEngine: corpus rỗng, TF-IDF bị bỏ qua")
 
     def search(self, query: str, top_k: int = 5) -> list[SearchResult]:
         """Search for documents matching the query.
@@ -138,6 +145,9 @@ class SearchEngine:
 
     def _tfidf_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
         """TF-IDF cosine similarity search."""
+        if not self._tfidf_ready:
+            return []
+
         query_vec = self._vectorizer.transform([query])
         similarities = cosine_similarity(query_vec, self._tfidf_matrix).flatten()
 

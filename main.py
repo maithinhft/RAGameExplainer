@@ -146,7 +146,11 @@ async def lifespan(app: FastAPI):
     """Khởi tạo RAG pipeline khi server khởi động + bật scheduler."""
     global pipeline, _refresh_task
 
-    # Khởi tạo pipeline lần đầu
+    # Crawl dữ liệu ngay lần đầu khi start
+    print("🚀 First start — crawling fresh data...")
+    success = _run_crawler()
+    if not success:
+        print("⚠️  Crawl lần đầu thất bại, thử dùng dữ liệu cũ nếu có...")
     _rebuild_pipeline()
 
     # Bật background task cập nhật định kỳ
