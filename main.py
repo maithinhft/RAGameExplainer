@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
 """
-League of Legends RAG-powered Q&A
-==================================
+League of Legends RAG-powered Q&A — FastAPI Server
+====================================================
 
-Hệ thống hỏi đáp thông minh về League of Legends, sử dụng:
-- Dữ liệu crawl từ Riot Data Dragon (champions, items, runes, spells...)
-- RAG (Retrieval-Augmented Generation) để tìm context liên quan
-- Ollama LLM (qua ngrok) để sinh câu trả lời
+Hệ thống hỏi đáp thông minh về League of Legends qua REST API.
 
-Usage:
-    python main.py                          # Hỏi đáp với RAG + LLM
-    python main.py --offline                # Chỉ tìm kiếm data, không gọi LLM
-    python main.py --no-rag                 # Gửi thẳng câu hỏi cho LLM (không RAG)
-    python main.py --show-context           # Hiển thị context được tìm thấy
-    python main.py --question "Ahri build?" # Hỏi trực tiếp qua CLI
+Endpoints:
+    POST /ask              — Hỏi đáp với RAG + LLM
+    POST /search           — Chỉ tìm kiếm data (không gọi LLM)
+    POST /ask-direct       — Gửi thẳng cho LLM (không RAG)
+    GET  /stats            — Thống kê index
+    GET  /health           — Health check
+
+Chạy server:
+    python main.py
+    # hoặc
+    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
 
-import argparse
+from __future__ import annotations
+
 import json
-import sys
+import os
 import urllib.request
+from contextlib import asynccontextmanager
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from rag.pipeline import RAGPipeline
 
@@ -28,65 +38,261 @@ from rag.pipeline import RAGPipeline
 # CẤU HÌNH
 # ═══════════════════════════════════════════════════════════
 
-# Trỏ đích đến đúng cổng nhận thư của trạm trung chuyển
-SERVER_URL = "http://127.0.0.1:8080/nhan-tin-nhan"
+# URL của Ollama LLM server
+LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8080/nhan-tin-nhan")
 
-# Tên mô hình LLM (đảm bảo đã được tải sẵn trên server)
-MODEL_NAME = "qwen3:14b"
+# Tên mô hình LLM
+MODEL_NAME = os.getenv("LLM_MODEL", "qwen3:14b")
 
 # Đường dẫn tới dữ liệu đã crawl
-DATA_DIR = "league-of-legend/data"
+DATA_DIR = os.getenv("DATA_DIR", "league-of-legend/data")
+
+# Port mặc định
+PORT = int(os.getenv("PORT", "8000"))
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="lol-rag",
-        description="🎮 League of Legends RAG Q&A — Hỏi đáp thông minh với dữ liệu game",
-    )
-    parser.add_argument(
-        "--question", "-q", type=str, default=None,
-        help="Câu hỏi (nếu không cung cấp, sẽ hỏi interactive)",
-    )
-    parser.add_argument(
-        "--offline", action="store_true",
-        help="Chế độ offline: chỉ tìm kiếm data, không gọi LLM",
-    )
-    parser.add_argument(
-        "--no-rag", action="store_true",
-        help="Gửi thẳng câu hỏi cho LLM mà không có context từ RAG",
-    )
-    parser.add_argument(
-        "--show-context", action="store_true",
-        help="Hiển thị dữ liệu context được tìm thấy trước khi gửi cho LLM",
-    )
-    parser.add_argument(
-        "--compact", action="store_true",
-        help="Dùng prompt ngắn gọn hơn (cho model có context window nhỏ)",
-    )
-    parser.add_argument(
-        "--top-k", type=int, default=5,
-        help="Số lượng kết quả tìm kiếm sử dụng cho context (default: 5)",
-    )
-    parser.add_argument(
-        "--server-url", type=str, default=SERVER_URL,
-        help="URL của Ollama server (ngrok)",
-    )
-    parser.add_argument(
-        "--model", type=str, default=MODEL_NAME,
-        help="Tên mô hình LLM",
-    )
-    parser.add_argument(
-        "--interactive", "-i", action="store_true",
-        help="Chế độ interactive: hỏi liên tục",
-    )
-    return parser.parse_args()
+# ═══════════════════════════════════════════════════════════
+# RAG PIPELINE (singleton, khởi tạo khi server start)
+# ═══════════════════════════════════════════════════════════
+
+pipeline: RAGPipeline | None = None
 
 
-def query_llm_direct(question: str, server_url: str, model_name: str) -> str:
-    """Gửi câu hỏi trực tiếp đến LLM mà không có RAG context."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Khởi tạo RAG pipeline khi server khởi động."""
+    global pipeline
+    print("🔧 Initializing RAG pipeline...")
+    pipeline = RAGPipeline(
+        data_dir=DATA_DIR,
+        server_url=LLM_SERVER_URL,
+        model_name=MODEL_NAME,
+        top_k=5,
+    )
+    pipeline.initialize()
+    print(f"✅ Server ready! Indexed {len(pipeline._indexer.documents)} documents")
+    yield
+    print("👋 Shutting down...")
+
+
+# ═══════════════════════════════════════════════════════════
+# FASTAPI APP
+# ═══════════════════════════════════════════════════════════
+
+app = FastAPI(
+    title="🎮 LoL RAG Q&A API",
+    description=(
+        "Hệ thống hỏi đáp thông minh về League of Legends sử dụng "
+        "RAG (Retrieval-Augmented Generation) với dữ liệu từ Riot Data Dragon."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS — cho phép frontend gọi API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ═══════════════════════════════════════════════════════════
+# REQUEST / RESPONSE MODELS
+# ═══════════════════════════════════════════════════════════
+
+class AskRequest(BaseModel):
+    """Body cho endpoint /ask và /ask-direct."""
+
+    question: str = Field(..., description="Câu hỏi về League of Legends", min_length=1)
+    top_k: int = Field(5, description="Số kết quả search context (1-20)", ge=1, le=20)
+    compact: bool = Field(False, description="Dùng prompt ngắn gọn hơn")
+    show_context: bool = Field(False, description="Trả về context tìm được")
+    model: str | None = Field(None, description="Override tên mô hình LLM")
+    server_url: str | None = Field(None, description="Override URL của LLM server")
+
+
+class SearchRequest(BaseModel):
+    """Body cho endpoint /search."""
+
+    query: str = Field(..., description="Từ khóa tìm kiếm", min_length=1)
+    top_k: int = Field(5, description="Số kết quả trả về (1-20)", ge=1, le=20)
+
+
+class SearchResultItem(BaseModel):
+    """Một kết quả tìm kiếm."""
+
+    rank: int
+    title: str
+    category: str
+    score: float
+    match_type: str
+    content: str
+
+
+class AskResponse(BaseModel):
+    """Response cho endpoint /ask."""
+
+    question: str
+    answer: str
+    context: list[SearchResultItem] | None = None
+
+
+class SearchResponse(BaseModel):
+    """Response cho endpoint /search."""
+
+    query: str
+    results: list[SearchResultItem]
+    total: int
+
+
+class StatsResponse(BaseModel):
+    """Response cho endpoint /stats."""
+
+    total_documents: int
+    categories: dict[str, int]
+    llm_server_url: str
+    model_name: str
+
+
+# ═══════════════════════════════════════════════════════════
+# ENDPOINTS
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/health")
+async def health_check():
+    """Health check — kiểm tra server hoạt động."""
+    return {
+        "status": "ok",
+        "pipeline_ready": pipeline is not None and pipeline.is_initialized,
+    }
+
+
+@app.get("/stats", response_model=StatsResponse)
+async def get_stats():
+    """Thống kê dữ liệu đã index."""
+    if not pipeline or not pipeline._indexer:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+
+    # Đếm theo category
+    categories: dict[str, int] = {}
+    for doc in pipeline._indexer.documents:
+        categories[doc.category] = categories.get(doc.category, 0) + 1
+
+    return StatsResponse(
+        total_documents=len(pipeline._indexer.documents),
+        categories=categories,
+        llm_server_url=pipeline.server_url,
+        model_name=pipeline.model_name,
+    )
+
+
+@app.post("/search", response_model=SearchResponse)
+async def search(request: SearchRequest):
+    """Tìm kiếm dữ liệu game — không gọi LLM.
+
+    Trả về danh sách documents liên quan đến query.
+    """
+    if not pipeline:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+
+    results = pipeline.search(request.query)
+    items = [
+        SearchResultItem(
+            rank=i,
+            title=r.document.title,
+            category=r.document.category,
+            score=round(r.score, 3),
+            match_type=r.match_type,
+            content=r.document.content[:500],
+        )
+        for i, r in enumerate(results[:request.top_k], 1)
+    ]
+
+    return SearchResponse(
+        query=request.query,
+        results=items,
+        total=len(items),
+    )
+
+
+@app.post("/ask", response_model=AskResponse)
+async def ask(request: AskRequest):
+    """Hỏi đáp với RAG — tìm context từ data rồi gửi cho LLM.
+
+    Flow: question → search relevant data → build prompt with context → LLM → answer
+    """
+    if not pipeline:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+
+    # Override settings nếu cần
+    original_top_k = pipeline.top_k
+    original_compact = pipeline.compact_mode
+    original_model = pipeline.model_name
+    original_url = pipeline.server_url
+
+    try:
+        pipeline.top_k = request.top_k
+        pipeline.compact_mode = request.compact
+        if request.model:
+            pipeline.model_name = request.model
+        if request.server_url:
+            pipeline.server_url = request.server_url
+
+        # Lấy context
+        context_items = None
+        if request.show_context:
+            search_results = pipeline.search(request.question)
+            context_items = [
+                SearchResultItem(
+                    rank=i,
+                    title=r.document.title,
+                    category=r.document.category,
+                    score=round(r.score, 3),
+                    match_type=r.match_type,
+                    content=r.document.content[:500],
+                )
+                for i, r in enumerate(search_results, 1)
+            ]
+
+        # Gọi RAG pipeline
+        answer = pipeline.ask(request.question, show_context=False)
+
+        return AskResponse(
+            question=request.question,
+            answer=answer,
+            context=context_items,
+        )
+
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Không thể kết nối đến LLM server: {exc}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        # Restore settings
+        pipeline.top_k = original_top_k
+        pipeline.compact_mode = original_compact
+        pipeline.model_name = original_model
+        pipeline.server_url = original_url
+
+
+@app.post("/ask-direct", response_model=AskResponse)
+async def ask_direct(request: AskRequest):
+    """Hỏi thẳng LLM mà KHÔNG có RAG context.
+
+    Gửi câu hỏi trực tiếp đến Ollama server.
+    """
+    server_url = request.server_url or LLM_SERVER_URL
+    model = request.model or MODEL_NAME
+
     payload = {
-        "ten_mo_hinh": model_name,
-        "cau_hoi": question,
+        "ten_mo_hinh": model,
+        "cau_hoi": request.question,
     }
 
     req = urllib.request.Request(
@@ -103,81 +309,26 @@ def query_llm_direct(question: str, server_url: str, model_name: str) -> str:
         },
     )
 
-    response = urllib.request.urlopen(req)
-    result = json.loads(response.read().decode("utf-8"))
-    return result.get("cau_tra_loi_tu_he_thong", "(Không có câu trả lời)")
-
-
-def run_single_query(pipeline: RAGPipeline, question: str, args: argparse.Namespace) -> None:
-    """Xử lý một câu hỏi."""
-    print(f"\n🎯 Câu hỏi: {question}")
-    print("─" * 60)
-
     try:
-        if args.no_rag:
-            # Chế độ không RAG — gửi thẳng cho LLM
-            print("⚡ Chế độ NO-RAG: gửi thẳng cho LLM...")
-            answer = query_llm_direct(question, args.server_url, args.model)
-        elif args.offline:
-            # Chế độ offline — chỉ tìm kiếm data
-            answer = pipeline.ask_offline(question)
-        else:
-            # Chế độ RAG đầy đủ
-            answer = pipeline.ask(question, show_context=args.show_context)
-
-        print("\n--- HỆ THỐNG TRẢ LỜI ---")
-        print(answer)
-        print("─" * 60)
-
-    except ConnectionError as exc:
-        print(f"\n⚠ Lỗi kết nối đến LLM server: {exc}")
-        print("💡 Thử chế độ offline: python main.py --offline")
+        response = urllib.request.urlopen(req)
+        result = json.loads(response.read().decode("utf-8"))
+        answer = result.get("cau_tra_loi_tu_he_thong", "(Không có câu trả lời)")
     except Exception as exc:
-        print(f"\n❌ Lỗi: {exc}")
+        raise HTTPException(status_code=502, detail=f"LLM server error: {exc}")
+
+    return AskResponse(question=request.question, answer=answer)
 
 
-def main() -> None:
-    args = parse_args()
-
-    # Khởi tạo RAG pipeline (trừ chế độ no-rag)
-    pipeline = None
-    if not args.no_rag:
-        pipeline = RAGPipeline(
-            data_dir=DATA_DIR,
-            server_url=args.server_url,
-            model_name=args.model,
-            top_k=args.top_k,
-            compact_mode=args.compact,
-        )
-        pipeline.initialize()
-
-    # Xác định câu hỏi
-    if args.question:
-        run_single_query(pipeline, args.question, args)
-
-    elif args.interactive:
-        # Chế độ interactive
-        print("\n🎮 League of Legends RAG Q&A — Interactive Mode")
-        print("Gõ 'quit' hoặc 'exit' để thoát.\n")
-
-        while True:
-            try:
-                question = input("❓ Câu hỏi: ").strip()
-                if question.lower() in ("quit", "exit", "q"):
-                    print("👋 Tạm biệt!")
-                    break
-                if not question:
-                    continue
-                run_single_query(pipeline, question, args)
-                print()
-            except (KeyboardInterrupt, EOFError):
-                print("\n👋 Tạm biệt!")
-                break
-    else:
-        # Câu hỏi mặc định
-        default_question = "Tại sao hiện tại người ta lại lên đai lưng hextech cho ahri trong liên minh huyền thoại?"
-        run_single_query(pipeline, default_question, args)
-
+# ═══════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    main()
+    print(f"� Starting LoL RAG API server on http://0.0.0.0:{PORT}")
+    print(f"📖 Docs: http://localhost:{PORT}/docs")
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=PORT,
+        reload=False,
+    )
