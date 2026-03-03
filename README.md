@@ -122,7 +122,7 @@ Cấu hình qua **environment variables**:
 | Biến | Mặc định | Mô tả |
 |------|----------|-------|
 | `LLM_SERVER_URL` | `http://127.0.0.1:11434/api/generate` | URL Ollama API |
-| `LLM_MODEL` | `qwen3:14b` | Tên model LLM |
+| `LLM_MODEL` | `qwen3.5:9b` | Tên model LLM |
 | `DATA_DIR` | `league-of-legend/data` | Thư mục chứa data crawl |
 | `CRAWLER_DIR` | `league-of-legend` | Thư mục gốc crawler |
 | `REFRESH_INTERVAL_SECONDS` | `3600` | Chu kỳ auto-refresh (giây) |

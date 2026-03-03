@@ -24,7 +24,7 @@ class RAGPipeline:
         pipeline = RAGPipeline(
             data_dir="league-of-legend/data",
             server_url="https://xxxx.ngrok-free.app/nhan-tin-nhan",
-            model_name="qwen3:14b",
+            model_name="qwen3.5:9b",
         )
         pipeline.initialize()
         answer = pipeline.ask("Tại sao lên đai lưng hextech cho Ahri?")
@@ -34,7 +34,7 @@ class RAGPipeline:
         self,
         data_dir: str | Path = "league-of-legend/data",
         server_url: str = "",
-        model_name: str = "qwen3:14b",
+        model_name: str = "qwen3.5:9b",
         top_k: int = 5,
         compact_mode: bool = False,
         max_context_length: int = 4000,
