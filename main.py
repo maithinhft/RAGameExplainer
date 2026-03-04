@@ -85,7 +85,7 @@ def _run_crawler() -> bool:
     print("🔄 Đang crawl dữ liệu mới từ Data Dragon...")
     try:
         result = subprocess.run(
-            [sys.executable, "main.py", "--all"],
+            [sys.executable, "main.py", "--all", "--lang", "vi_VN"],
             cwd=CRAWLER_DIR,
             capture_output=True,
             text=True,
