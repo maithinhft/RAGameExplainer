@@ -409,8 +409,8 @@ async def ask_direct(request: AskRequest):
 
     req = urllib.request.Request(
         server_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
     )
 
     try:
