@@ -35,6 +35,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rag.pipeline import RAGPipeline
@@ -340,6 +341,55 @@ async def search(request: SearchRequest):
     )
 
 
+@app.get("/champions")
+async def list_champions():
+    """Danh sách tất cả tướng — cho frontend champion selector."""
+    if not pipeline or not pipeline._indexer:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+
+    champions = []
+    for doc in pipeline._indexer.documents:
+        if doc.category == "champion":
+            raw = doc.raw_data
+            champions.append({
+                "id": raw.get("champion_id", ""),
+                "name": raw.get("name", ""),
+                "title": raw.get("title", ""),
+                "tags": raw.get("tags", []),
+                "image": f"https://ddragon.leagueoflegends.com/cdn/img/champion/tiles/{raw.get('champion_id', '')}_0.jpg",
+            })
+
+    champions.sort(key=lambda c: c["name"])
+    return {"champions": champions, "total": len(champions)}
+
+
+@app.get("/items")
+async def list_items():
+    """Danh sách tất cả trang bị — cho frontend item builder."""
+    if not pipeline or not pipeline._indexer:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+
+    items_list = []
+    for doc in pipeline._indexer.documents:
+        if doc.category == "item":
+            raw = doc.raw_data
+            gold = raw.get("gold", {})
+            # Chỉ lấy item có thể mua (purchasable)
+            if not gold.get("purchasable", True):
+                continue
+            items_list.append({
+                "id": raw.get("item_id", ""),
+                "name": raw.get("name", ""),
+                "description": raw.get("plaintext", ""),
+                "gold": gold.get("total", 0),
+                "tags": raw.get("tags", []),
+                "image": f"https://ddragon.leagueoflegends.com/cdn/14.24.1/img/item/{raw.get('item_id', '')}.png",
+            })
+
+    items_list.sort(key=lambda i: i["name"])
+    return {"items": items_list, "total": len(items_list)}
+
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest):
     """Hỏi đáp với RAG — tìm context từ data rồi gửi cho LLM.
@@ -445,6 +495,13 @@ async def ask_direct(request: AskRequest):
         raise HTTPException(status_code=502, detail=f"LLM server error: {exc}")
 
     return AskResponse(question=request.question, answer=answer)
+
+
+# ═══════════════════════════════════════════════════════════
+# STATIC FILES (Frontend) — phải đặt SAU tất cả API routes
+# ═══════════════════════════════════════════════════════════
+
+app.mount("/", StaticFiles(directory="fe", html=True), name="frontend")
 
 
 # ═══════════════════════════════════════════════════════════

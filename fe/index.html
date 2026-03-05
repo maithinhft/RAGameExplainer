@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAGameExplainer — LoL Assistant</title>
+  <meta name="description" content="Hệ thống hỏi đáp thông minh về League of Legends với RAG AI">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- ═══ Sidebar Navigation ═══ -->
+    <nav class="sidebar">
+      <div class="logo">⚔</div>
+      <button class="nav-btn active" data-panel="chat" title="Chat">💬</button>
+      <button class="nav-btn" data-panel="build" title="Build">🛡</button>
+    </nav>
+
+    <!-- ═══ Main Content ═══ -->
+    <div class="main-content">
+
+      <!-- ═══ CHAT PANEL ═══ -->
+      <section id="chatPanel" class="panel active">
+        <div class="panel-header">
+          <h1>⚔ RAGameExplainer</h1>
+          <p>Hỏi bất kỳ điều gì về League of Legends</p>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+          <div class="message bot">
+            <div class="msg-avatar">🤖</div>
+            <div class="msg-bubble">
+              Xin chào! Tôi là trợ lý League of Legends. Hãy hỏi tôi về tướng, trang bị, bảng ngọc, hay bất kỳ chiến thuật nào!
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-input-area">
+          <div class="chat-input-wrapper">
+            <input type="text" id="chatInput" placeholder="Hỏi về League of Legends... (VD: Tại sao lên đai lưng hextech cho Ahri?)" autocomplete="off">
+            <button id="sendBtn" title="Gửi">➤</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ BUILD PANEL ═══ -->
+      <section id="buildPanel" class="panel">
+        <div class="panel-header">
+          <h1>🛡 Item Builder</h1>
+          <p>Chọn tướng → ghép trang bị → nhận đánh giá từ AI</p>
+        </div>
+
+        <div class="build-layout">
+          <!-- Champion Selector -->
+          <div class="champion-panel">
+            <div class="search-box">
+              <input type="text" id="champSearch" placeholder="🔍 Tìm tướng...">
+            </div>
+            <div class="champion-grid" id="championGrid">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+
+          <!-- Item Builder -->
+          <div class="item-panel">
+            <div class="build-display">
+              <div class="selected-champion" id="selectedChampion">
+                <span class="placeholder-text">← Chọn một tướng để bắt đầu</span>
+              </div>
+
+              <div class="item-slots" id="itemSlots">
+                <div class="item-slot" data-slot="0">+</div>
+                <div class="item-slot" data-slot="1">+</div>
+                <div class="item-slot" data-slot="2">+</div>
+                <div class="item-slot" data-slot="3">+</div>
+                <div class="item-slot" data-slot="4">+</div>
+                <div class="item-slot" data-slot="5">+</div>
+              </div>
+
+              <button class="ask-build-btn" id="askBuildBtn" disabled>
+                🤖 Hỏi AI đánh giá build này
+              </button>
+            </div>
+
+            <div class="build-response" id="buildResponse"></div>
+
+            <div class="item-search-area">
+              <input type="text" id="itemSearch" placeholder="🔍 Tìm trang bị...">
+            </div>
+
+            <div class="item-tag-filter" id="itemTagFilter">
+              <button class="tag-btn active" data-tag="">Tất cả</button>
+              <button class="tag-btn" data-tag="Damage">Damage</button>
+              <button class="tag-btn" data-tag="SpellDamage">AP</button>
+              <button class="tag-btn" data-tag="Defense">Defense</button>
+              <button class="tag-btn" data-tag="Health">Health</button>
+              <button class="tag-btn" data-tag="Armor">Armor</button>
+              <button class="tag-btn" data-tag="SpellBlock">MR</button>
+              <button class="tag-btn" data-tag="Boots">Boots</button>
+              <button class="tag-btn" data-tag="LifeSteal">Lifesteal</button>
+              <button class="tag-btn" data-tag="AttackSpeed">AS</button>
+              <button class="tag-btn" data-tag="CriticalStrike">Crit</button>
+              <button class="tag-btn" data-tag="AbilityHaste">AH</button>
+            </div>
+
+            <div class="item-grid" id="itemGrid">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
