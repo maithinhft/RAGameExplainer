@@ -2,7 +2,16 @@
    RAGameExplainer — Frontend Application
    ═══════════════════════════════════════════════════════════ */
 
-const API_BASE = window.location.origin;
+const API_BASE = "https://c0f2-34-158-37-235.ngrok-free.app";
+
+// ─── API Helper (bypass ngrok warning page) ───
+function apiFetch(path, options = {}) {
+    const headers = {
+        "ngrok-skip-browser-warning": "true",
+        ...(options.headers || {}),
+    };
+    return fetch(`${API_BASE}${path}`, { ...options, headers });
+}
 
 // ─── State ───
 const state = {
@@ -102,7 +111,7 @@ async function sendChat() {
     addTypingIndicator();
 
     try {
-        const res = await fetch(`${API_BASE}/ask`, {
+        const res = await apiFetch("/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ question, top_k: 5, show_context: false }),
@@ -142,7 +151,7 @@ chatInput.addEventListener("keydown", (e) => {
 
 async function loadChampions() {
     try {
-        const res = await fetch(`${API_BASE}/champions`);
+        const res = await apiFetch("/champions");
         const data = await res.json();
         state.champions = data.champions || [];
         renderChampions();
@@ -209,7 +218,7 @@ champSearch.addEventListener("input", (e) => renderChampions(e.target.value));
 
 async function loadItems() {
     try {
-        const res = await fetch(`${API_BASE}/items`);
+        const res = await apiFetch("/items");
         const data = await res.json();
         state.items = data.items || [];
         renderItems();
@@ -331,7 +340,7 @@ askBuildBtn.addEventListener("click", async () => {
     buildResponse.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
 
     try {
-        const res = await fetch(`${API_BASE}/ask`, {
+        const res = await apiFetch("/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ question, top_k: 5 }),

@@ -356,7 +356,7 @@ async def list_champions():
                 "name": raw.get("name", ""),
                 "title": raw.get("title", ""),
                 "tags": raw.get("tags", []),
-                "image": f"https://ddragon.leagueoflegends.com/cdn/img/champion/tiles/{raw.get('champion_id', '')}_0.jpg",
+                "image": f"https://ddragon.leagueoflegends.com/cdn/14.24.1/img/champion/{raw.get('champion_id', '')}.png",
             })
 
     champions.sort(key=lambda c: c["name"])
