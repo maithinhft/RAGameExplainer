@@ -6,11 +6,13 @@ RAG Pipeline — Orchestrates the full Retrieval-Augmented Generation flow.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+from rag.cache import ResponseCache
 from rag.indexer import Indexer
 from rag.search import SearchEngine, SearchResult
 from rag.prompt_builder import build_prompt, build_prompt_compact
@@ -38,6 +40,8 @@ class RAGPipeline:
         top_k: int = 5,
         compact_mode: bool = False,
         max_context_length: int = 4000,
+        cache_max_size: int = 200,
+        cache_ttl: int = 3600,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.server_url = server_url
@@ -48,6 +52,7 @@ class RAGPipeline:
 
         self._indexer: Indexer | None = None
         self._engine: SearchEngine | None = None
+        self.cache = ResponseCache(max_size=cache_max_size, ttl=cache_ttl)
 
     def initialize(self) -> None:
         """Build the index and search engine. Call once before asking questions."""
@@ -75,8 +80,13 @@ class RAGPipeline:
             return build_prompt_compact(question, results, self.max_context_length)
         return build_prompt(question, results, self.max_context_length)
 
+    def _context_hash(self, results: list[SearchResult]) -> str:
+        """Hash search results to use as part of cache key."""
+        ids = "|".join(r.document.doc_id for r in results[:5])
+        return hashlib.md5(ids.encode()).hexdigest()[:12]
+
     def ask(self, question: str, show_context: bool = False) -> str:
-        """Full pipeline: search → build prompt → query LLM → return answer.
+        """Full pipeline: cache check → search → build prompt → query LLM → cache store.
 
         Args:
             question: The user's question in Vietnamese or English.
@@ -90,6 +100,13 @@ class RAGPipeline:
 
         # Step 1: Search for relevant documents
         results = self.search(question)
+        ctx_hash = self._context_hash(results)
+
+        # Step 2: Check cache
+        cached = self.cache.get(question, ctx_hash)
+        if cached is not None:
+            print(f"⚡ Cache hit for: {question[:50]}...")
+            return cached
 
         if show_context:
             print("\n📚 Retrieved context:")
@@ -97,14 +114,17 @@ class RAGPipeline:
                 print(f"  [{i}] {r.document.title} (score: {r.score:.3f}, type: {r.match_type})")
             print()
 
-        # Step 2: Build augmented prompt
+        # Step 3: Build augmented prompt
         if self.compact_mode:
             prompt = build_prompt_compact(question, results, self.max_context_length)
         else:
             prompt = build_prompt(question, results, self.max_context_length)
 
-        # Step 3: Query LLM
+        # Step 4: Query LLM
         answer = self._query_llm(prompt)
+
+        # Step 5: Store in cache
+        self.cache.put(question, ctx_hash, answer)
 
         return answer
 

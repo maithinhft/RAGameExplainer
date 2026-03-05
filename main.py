@@ -38,6 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from rag.pipeline import RAGPipeline
+from rag.queue import RequestQueue
 
 
 # ═══════════════════════════════════════════════════════════
@@ -68,6 +69,7 @@ PORT = int(os.getenv("PORT", "8000"))
 # ═══════════════════════════════════════════════════════════
 
 pipeline: RAGPipeline | None = None
+llm_queue: RequestQueue = RequestQueue(max_concurrent=1, timeout=120)
 _refresh_task: asyncio.Task | None = None
 last_refresh_time: str = "(chưa cập nhật)"
 
@@ -279,6 +281,15 @@ async def manual_refresh():
     raise HTTPException(status_code=500, detail="Crawl thất bại, giữ lại dữ liệu cũ")
 
 
+@app.get("/cache-stats")
+async def cache_stats():
+    """Thống kê cache và queue."""
+    return {
+        "cache": pipeline.cache.stats if pipeline else {},
+        "queue": llm_queue.stats.to_dict(),
+    }
+
+
 @app.get("/stats", response_model=StatsResponse)
 async def get_stats():
     """Thống kê dữ liệu đã index."""
@@ -333,7 +344,7 @@ async def search(request: SearchRequest):
 async def ask(request: AskRequest):
     """Hỏi đáp với RAG — tìm context từ data rồi gửi cho LLM.
 
-    Flow: question → search relevant data → build prompt with context → LLM → answer
+    Flow: cache check → queue → search → prompt → LLM → cache store
     """
     if not pipeline:
         raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
@@ -368,8 +379,13 @@ async def ask(request: AskRequest):
                 for i, r in enumerate(search_results, 1)
             ]
 
-        # Gọi RAG pipeline
-        answer = pipeline.ask(request.question, show_context=False)
+        # Check cache trước (pipeline.ask tự check)
+        # Nếu cache miss → vào queue chờ LLM
+        loop = asyncio.get_event_loop()
+        async with llm_queue.acquire():
+            answer = await loop.run_in_executor(
+                None, pipeline.ask, request.question, False
+            )
 
         return AskResponse(
             question=request.question,
@@ -377,6 +393,8 @@ async def ask(request: AskRequest):
             context=context_items,
         )
 
+    except TimeoutError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except ConnectionError as exc:
         raise HTTPException(
             status_code=502,
@@ -414,9 +432,15 @@ async def ask_direct(request: AskRequest):
     )
 
     try:
-        response = urllib.request.urlopen(req)
-        result = json.loads(response.read().decode("utf-8"))
+        loop = asyncio.get_event_loop()
+        async with llm_queue.acquire():
+            response = await loop.run_in_executor(
+                None, urllib.request.urlopen, req
+            )
+            result = json.loads(response.read().decode("utf-8"))
         answer = result.get("response", "(Không có câu trả lời)")
+    except TimeoutError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM server error: {exc}")
 
