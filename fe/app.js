@@ -2,7 +2,7 @@
    RAGameExplainer — Frontend Application
    ═══════════════════════════════════════════════════════════ */
 
-const API_BASE = "https://c0f2-34-158-37-235.ngrok-free.app";
+const API_BASE = "https://047d-35-233-153-29.ngrok-free.app";
 
 // ─── API Helper (bypass ngrok warning page) ───
 function apiFetch(path, options = {}) {

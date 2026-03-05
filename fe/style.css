@@ -415,9 +415,9 @@ body {
   overflow-y: auto;
   padding: 12px;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fill, 56px);
   gap: 6px;
-  align-content: start;
+  justify-content: center;
 }
 
 .champion-grid::-webkit-scrollbar {
@@ -430,7 +430,8 @@ body {
 }
 
 .champ-card {
-  aspect-ratio: 1;
+  width: 56px;
+  height: 56px;
   border-radius: var(--radius-sm);
   overflow: hidden;
   cursor: pointer;
@@ -438,13 +439,14 @@ body {
   border: 2px solid transparent;
   transition: var(--transition);
   background: var(--bg-glass);
+  flex-shrink: 0;
 }
 
 .champ-card img {
-  width: 100%;
-  height: 100%;
+  width: 56px;
+  height: 56px;
   object-fit: cover;
-  object-position: center 15%;
+  display: block;
 }
 
 .champ-card:hover {
