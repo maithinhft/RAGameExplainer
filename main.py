@@ -25,9 +25,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -504,10 +506,11 @@ async def ask_direct(request: AskRequest):
 async def ask_stream(request: AskRequest):
     """RAG + Streaming — tìm context rồi stream từng token từ LLM.
 
-    Trả về StreamingResponse (ndjson). Mỗi dòng là 1 JSON object từ Ollama:
-        {"model": "...", "response": "token", "done": false}
-
-    Dòng cuối cùng có "done": true kèm metadata.
+    Trả về StreamingResponse (ndjson). Mỗi dòng là 1 JSON object:
+        - Heartbeat (giữ kết nối sống):  {"status": "processing", "done": false}
+        - Token từ LLM:                  {"model": "...", "response": "token", "done": false}
+        - Kết thúc:                      {"model": "...", "response": "", "done": true, ...}
+        - Lỗi:                           {"error": "..."}
     """
     if not pipeline:
         raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
@@ -525,30 +528,62 @@ async def ask_stream(request: AskRequest):
     if request.server_url:
         pipeline.server_url = request.server_url
 
-    def generate():
+    # ── Heartbeat streaming generator ──
+    # Pipeline chạy trong thread riêng, đẩy data vào queue.
+    # Generator chính cứ 5 giây gửi heartbeat nếu chưa có data → giữ Cloudflare sống.
+
+    HEARTBEAT_INTERVAL = 5  # giây
+    _SENTINEL = object()    # đánh dấu hết stream
+
+    data_queue: queue.Queue = queue.Queue()
+
+    def worker():
+        """Chạy pipeline trong thread riêng, đẩy chunk vào queue."""
         try:
-            yield from pipeline.ask_stream(request.question)
-        except ConnectionError as exc:
-            error_payload = json.dumps({"error": str(exc)}) + "\n"
-            yield error_payload.encode("utf-8")
+            for chunk in pipeline.ask_stream(request.question):
+                data_queue.put(chunk)
         except Exception as exc:
-            error_payload = json.dumps({"error": str(exc)}) + "\n"
-            yield error_payload.encode("utf-8")
+            data_queue.put(exc)
         finally:
+            data_queue.put(_SENTINEL)
             # Restore settings
             pipeline.top_k = original_top_k
             pipeline.compact_mode = original_compact
             pipeline.model_name = original_model
             pipeline.server_url = original_url
 
+    def generate():
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while True:
+            try:
+                item = data_queue.get(timeout=HEARTBEAT_INTERVAL)
+
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    error_line = json.dumps({"error": str(item)}) + "\n"
+                    yield error_line.encode("utf-8")
+                    break
+
+                # Data chunk từ Ollama (bytes)
+                yield item
+
+            except queue.Empty:
+                # Không có data trong 5 giây → gửi heartbeat giữ kết nối
+                heartbeat = json.dumps({"status": "processing", "done": False}) + "\n"
+                yield heartbeat.encode("utf-8")
+
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 @app.post("/ask-direct-stream")
 async def ask_direct_stream(request: AskRequest):
-    """Streaming trực tiếp đến Ollama KHÔNG qua RAG.
+    """Streaming trực tiếp đến Ollama KHÔNG qua RAG (có heartbeat keepalive).
 
     Gửi câu hỏi thẳng cho Ollama và stream response về client.
+    Gửi heartbeat mỗi 5 giây nếu LLM chưa trả token → tránh Cloudflare timeout.
     """
     server_url = request.server_url or LLM_SERVER_URL
     model = request.model or MODEL_NAME
@@ -559,7 +594,13 @@ async def ask_direct_stream(request: AskRequest):
         "stream": True,
     }
 
-    def generate():
+    HEARTBEAT_INTERVAL = 5
+    _SENTINEL = object()
+
+    data_queue: queue.Queue = queue.Queue()
+
+    def worker():
+        """Gọi Ollama trong thread riêng."""
         req = urllib.request.Request(
             server_url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -569,10 +610,32 @@ async def ask_direct_stream(request: AskRequest):
             response = urllib.request.urlopen(req)
             for line in response:
                 if line.strip():
-                    yield line
+                    data_queue.put(line)
         except Exception as exc:
-            error_payload = json.dumps({"error": str(exc)}) + "\n"
-            yield error_payload.encode("utf-8")
+            data_queue.put(exc)
+        finally:
+            data_queue.put(_SENTINEL)
+
+    def generate():
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while True:
+            try:
+                item = data_queue.get(timeout=HEARTBEAT_INTERVAL)
+
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    error_line = json.dumps({"error": str(item)}) + "\n"
+                    yield error_line.encode("utf-8")
+                    break
+
+                yield item
+
+            except queue.Empty:
+                heartbeat = json.dumps({"status": "processing", "done": False}) + "\n"
+                yield heartbeat.encode("utf-8")
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
