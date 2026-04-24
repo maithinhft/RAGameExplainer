@@ -7,8 +7,10 @@ Hệ thống hỏi đáp thông minh về League of Legends qua REST API.
 
 Endpoints:
     POST /ask              — Hỏi đáp với RAG + LLM
+    POST /ask-stream       — Hỏi đáp với RAG + LLM (streaming từng token)
     POST /search           — Chỉ tìm kiếm data (không gọi LLM)
     POST /ask-direct       — Gửi thẳng cho LLM (không RAG)
+    POST /ask-direct-stream — Gửi thẳng cho LLM streaming (không RAG)
     GET  /stats            — Thống kê index
     GET  /health           — Health check
 
@@ -35,6 +37,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -495,6 +498,83 @@ async def ask_direct(request: AskRequest):
         raise HTTPException(status_code=502, detail=f"LLM server error: {exc}")
 
     return AskResponse(question=request.question, answer=answer)
+
+
+@app.post("/ask-stream")
+async def ask_stream(request: AskRequest):
+    """RAG + Streaming — tìm context rồi stream từng token từ LLM.
+
+    Trả về StreamingResponse (ndjson). Mỗi dòng là 1 JSON object từ Ollama:
+        {"model": "...", "response": "token", "done": false}
+
+    Dòng cuối cùng có "done": true kèm metadata.
+    """
+    if not pipeline:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+
+    # Override settings nếu cần
+    original_top_k = pipeline.top_k
+    original_compact = pipeline.compact_mode
+    original_model = pipeline.model_name
+    original_url = pipeline.server_url
+
+    pipeline.top_k = request.top_k
+    pipeline.compact_mode = request.compact
+    if request.model:
+        pipeline.model_name = request.model
+    if request.server_url:
+        pipeline.server_url = request.server_url
+
+    def generate():
+        try:
+            yield from pipeline.ask_stream(request.question)
+        except ConnectionError as exc:
+            error_payload = json.dumps({"error": str(exc)}) + "\n"
+            yield error_payload.encode("utf-8")
+        except Exception as exc:
+            error_payload = json.dumps({"error": str(exc)}) + "\n"
+            yield error_payload.encode("utf-8")
+        finally:
+            # Restore settings
+            pipeline.top_k = original_top_k
+            pipeline.compact_mode = original_compact
+            pipeline.model_name = original_model
+            pipeline.server_url = original_url
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@app.post("/ask-direct-stream")
+async def ask_direct_stream(request: AskRequest):
+    """Streaming trực tiếp đến Ollama KHÔNG qua RAG.
+
+    Gửi câu hỏi thẳng cho Ollama và stream response về client.
+    """
+    server_url = request.server_url or LLM_SERVER_URL
+    model = request.model or MODEL_NAME
+
+    payload = {
+        "model": model,
+        "prompt": request.question,
+        "stream": True,
+    }
+
+    def generate():
+        req = urllib.request.Request(
+            server_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        try:
+            response = urllib.request.urlopen(req)
+            for line in response:
+                if line.strip():
+                    yield line
+        except Exception as exc:
+            error_payload = json.dumps({"error": str(exc)}) + "\n"
+            yield error_payload.encode("utf-8")
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 # ═══════════════════════════════════════════════════════════

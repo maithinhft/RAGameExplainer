@@ -10,7 +10,7 @@ import hashlib
 import json
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 from rag.cache import ResponseCache
 from rag.indexer import Indexer
@@ -163,6 +163,66 @@ class RAGPipeline:
             return result.get("response", "(Không có câu trả lời)")
         except Exception as exc:
             raise ConnectionError(f"Failed to reach LLM server: {exc}") from exc
+
+    def _query_llm_stream(self, prompt: str) -> Generator[bytes, None, None]:
+        """Stream the LLM response token-by-token from Ollama.
+
+        Yields each JSON line (ndjson) as bytes.
+        """
+        if not self.server_url:
+            raise ValueError(
+                "Server URL not configured. Set server_url when creating RAGPipeline."
+            )
+
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": True,
+        }
+
+        req = urllib.request.Request(
+            self.server_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+
+        try:
+            response = urllib.request.urlopen(req)
+            # Read the response line-by-line (ndjson format)
+            for line in response:
+                if line.strip():
+                    yield line
+        except Exception as exc:
+            raise ConnectionError(f"Failed to reach LLM server: {exc}") from exc
+
+    def ask_stream(
+        self, question: str, show_context: bool = False
+    ) -> Generator[bytes, None, None]:
+        """Full RAG pipeline with streaming LLM response.
+
+        Yields ndjson bytes — each line is a JSON object from Ollama.
+        Cache is NOT used for streaming (since we yield partial results).
+        """
+        if not self.is_initialized:
+            self.initialize()
+
+        # Step 1: Search for relevant documents
+        results = self.search(question)
+
+        if show_context:
+            print("\n📚 Retrieved context:")
+            for i, r in enumerate(results, 1):
+                print(f"  [{i}] {r.document.title} (score: {r.score:.3f}, type: {r.match_type})")
+            print()
+
+        # Step 2: Build augmented prompt
+        if self.compact_mode:
+            prompt = build_prompt_compact(question, results, self.max_context_length)
+        else:
+            prompt = build_prompt(question, results, self.max_context_length)
+
+        # Step 3: Stream from LLM
+        yield from self._query_llm_stream(prompt)
 
     def ask_offline(self, question: str) -> str:
         """Search-only mode: return relevant data without querying the LLM.
