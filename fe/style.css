@@ -366,6 +366,20 @@ body {
   }
 }
 
+/* ─── Streaming cursor (blinking caret while tokens arrive) ─── */
+.streaming-bubble::after {
+  content: '▊';
+  color: var(--gold);
+  animation: blinkCursor 0.8s step-end infinite;
+  margin-left: 2px;
+  font-weight: 300;
+}
+
+@keyframes blinkCursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 /* ═══════════════ BUILD PANEL ═══════════════ */
 
 .build-layout {

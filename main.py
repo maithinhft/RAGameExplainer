@@ -55,7 +55,7 @@ from rag.queue import RequestQueue
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:11434/api/generate")
 
 # Tên mô hình LLM
-MODEL_NAME = os.getenv("LLM_MODEL", "qwen3.5:9b")
+MODEL_NAME = os.getenv("LLM_MODEL", "qwen3.6:27b")
 
 # Đường dẫn tới dữ liệu đã crawl
 DATA_DIR = os.getenv("DATA_DIR", "league-of-legend/data")

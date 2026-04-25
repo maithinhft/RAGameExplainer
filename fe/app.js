@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════════════════════
-   RAGameExplainer — Frontend Application
+   RAGameExplainer — Frontend Application (Streaming Edition)
    ═══════════════════════════════════════════════════════════ */
 
-const API_BASE = "https://fe9f-34-125-12-177.ngrok-free.app";
+const API_BASE = "https://print-quit-disc-interactive.trycloudflare.com";
 
 // ─── API Helper (bypass ngrok warning page) ───
 function apiFetch(path, options = {}) {
@@ -54,6 +54,87 @@ $$(".nav-btn").forEach((btn) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// STREAMING HELPER
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Gọi API streaming (ndjson) và xử lý từng token.
+ *
+ * @param {string} endpoint  — path API, ví dụ "/ask-stream"
+ * @param {object} body      — request body (JSON)
+ * @param {function} onToken — callback(tokenText) gọi mỗi khi nhận được 1 token
+ * @param {function} onDone  — callback() gọi khi stream kết thúc
+ * @param {function} onError — callback(errorMsg) gọi khi có lỗi
+ */
+async function fetchStream(endpoint, body, { onToken, onDone, onError }) {
+    try {
+        const res = await apiFetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            onError(err.detail || res.statusText);
+            return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // Xử lý từng dòng ndjson trong buffer
+            const lines = buffer.split("\n");
+            // Dòng cuối có thể chưa hoàn chỉnh → giữ lại trong buffer
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+
+                try {
+                    const data = JSON.parse(trimmed);
+
+                    // Bỏ qua heartbeat (keepalive)
+                    if (data.status === "processing") continue;
+
+                    // Lỗi từ server
+                    if (data.error) {
+                        onError(data.error);
+                        return;
+                    }
+
+                    // Token từ LLM
+                    if (data.response !== undefined) {
+                        onToken(data.response);
+                    }
+
+                    // Stream kết thúc
+                    if (data.done === true) {
+                        onDone();
+                        return;
+                    }
+                } catch {
+                    // Dòng JSON không hợp lệ → bỏ qua
+                }
+            }
+        }
+
+        // Stream đóng mà chưa nhận done → vẫn gọi onDone
+        onDone();
+    } catch (e) {
+        onError(`Không thể kết nối server: ${e.message}`);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // CHAT
 // ═══════════════════════════════════════════════════════════
 
@@ -68,6 +149,21 @@ function addMessage(text, type = "bot") {
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return div;
+}
+
+/**
+ * Tạo một message bot trống, trả về element bubble để append text streaming.
+ */
+function addStreamingMessage() {
+    const div = document.createElement("div");
+    div.className = "message bot";
+    div.innerHTML = `
+    <div class="msg-avatar">🤖</div>
+    <div class="msg-bubble streaming-bubble"></div>
+  `;
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return div.querySelector(".streaming-bubble");
 }
 
 function addTypingIndicator() {
@@ -110,31 +206,51 @@ async function sendChat() {
     addMessage(question, "user");
     addTypingIndicator();
 
-    try {
-        const res = await apiFetch("/ask", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question, top_k: 5, show_context: false }),
-        });
+    // Biến lưu toàn bộ text thô (để format cuối cùng)
+    let rawAnswer = "";
+    let bubble = null;
 
-        removeTypingIndicator();
-
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            addMessage(`❌ Lỗi: ${err.detail || res.statusText}`);
-            return;
+    await fetchStream(
+        "/ask-stream",
+        { question, top_k: 5, show_context: false },
+        {
+            onToken(token) {
+                // Lần nhận token đầu tiên → xóa typing, tạo bubble
+                if (!bubble) {
+                    removeTypingIndicator();
+                    bubble = addStreamingMessage();
+                }
+                rawAnswer += token;
+                // Hiển thị real-time (format markdown cơ bản)
+                bubble.innerHTML = formatAnswer(rawAnswer);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            },
+            onDone() {
+                if (!bubble) {
+                    // Không nhận được token nào
+                    removeTypingIndicator();
+                    addMessage("⚠️ Không nhận được phản hồi từ AI.");
+                } else {
+                    // Format lại lần cuối + xóa cursor nhấp nháy
+                    bubble.classList.remove("streaming-bubble");
+                    bubble.innerHTML = formatAnswer(rawAnswer);
+                }
+            },
+            onError(msg) {
+                removeTypingIndicator();
+                if (bubble) {
+                    bubble.classList.remove("streaming-bubble");
+                    bubble.innerHTML += `<br><strong style="color:var(--red);">❌ Lỗi: ${msg}</strong>`;
+                } else {
+                    addMessage(`❌ Lỗi: ${msg}`);
+                }
+            },
         }
+    );
 
-        const data = await res.json();
-        addMessage(data.answer);
-    } catch (e) {
-        removeTypingIndicator();
-        addMessage(`❌ Không thể kết nối server: ${e.message}`);
-    } finally {
-        state.isLoading = false;
-        sendBtn.disabled = false;
-        chatInput.focus();
-    }
+    state.isLoading = false;
+    sendBtn.disabled = false;
+    chatInput.focus();
 }
 
 sendBtn.addEventListener("click", sendChat);
@@ -316,7 +432,7 @@ $$(".tag-btn").forEach((btn) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ASK BUILD
+// ASK BUILD (Streaming)
 // ═══════════════════════════════════════════════════════════
 
 askBuildBtn.addEventListener("click", async () => {
@@ -339,29 +455,44 @@ askBuildBtn.addEventListener("click", async () => {
     buildResponse.classList.add("visible");
     buildResponse.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
 
-    try {
-        const res = await apiFetch("/ask", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question, top_k: 5 }),
-        });
+    let rawAnswer = "";
+    let firstToken = true;
 
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            buildResponse.innerHTML = `❌ Lỗi: ${err.detail || res.statusText}`;
-            return;
+    await fetchStream(
+        "/ask-stream",
+        { question, top_k: 5 },
+        {
+            onToken(token) {
+                if (firstToken) {
+                    // Xóa typing indicator khi nhận token đầu tiên
+                    buildResponse.innerHTML = "";
+                    firstToken = false;
+                }
+                rawAnswer += token;
+                buildResponse.innerHTML = formatAnswer(rawAnswer);
+            },
+            onDone() {
+                if (firstToken) {
+                    buildResponse.innerHTML = "⚠️ Không nhận được phản hồi từ AI.";
+                } else {
+                    buildResponse.innerHTML = formatAnswer(rawAnswer);
+                }
+            },
+            onError(msg) {
+                if (firstToken) {
+                    buildResponse.innerHTML = `❌ Lỗi: ${msg}`;
+                } else {
+                    buildResponse.innerHTML = formatAnswer(rawAnswer) +
+                        `<br><strong style="color:var(--red);">❌ Lỗi: ${msg}</strong>`;
+                }
+            },
         }
+    );
 
-        const data = await res.json();
-        buildResponse.innerHTML = formatAnswer(data.answer);
-    } catch (e) {
-        buildResponse.innerHTML = `❌ Không thể kết nối: ${e.message}`;
-    } finally {
-        state.isLoading = false;
-        askBuildBtn.disabled = false;
-        askBuildBtn.innerHTML = "🤖 Hỏi AI đánh giá build này";
-        updateAskBuildBtn();
-    }
+    state.isLoading = false;
+    askBuildBtn.disabled = false;
+    askBuildBtn.innerHTML = "🤖 Hỏi AI đánh giá build này";
+    updateAskBuildBtn();
 });
 
 // ═══════════════════════════════════════════════════════════
